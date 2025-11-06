@@ -10,9 +10,11 @@ from threading import Thread
 import requests
 import gc
 
+# --- לוגים ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Flask לצורך שמירה על חיות השרת ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -23,6 +25,7 @@ def home():
 def health():
     return "OK", 200
 
+# --- פקודת התחלה ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 שלום! אני בוט תרגום כתוביות (Powered by Groq ⚡)\n\n"
@@ -35,19 +38,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚡ מהיר פי 10 מהגרסה הקודמת!"
     )
 
+# --- פונקציית תמלול עם Groq ---
 def transcribe_with_groq(audio_path):
-    """תמלול אודיו באמצעות Groq API"""
     GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
-    
     if not GROQ_API_KEY:
         raise Exception("GROQ_API_KEY לא מוגדר!")
-    
+
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}"
-    }
-    
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+
     with open(audio_path, 'rb') as audio_file:
         files = {
             'file': audio_file,
@@ -56,110 +55,112 @@ def transcribe_with_groq(audio_path):
             'response_format': (None, 'verbose_json'),
             'timestamp_granularities[]': (None, 'segment')
         }
-        
         response = requests.post(url, headers=headers, files=files, timeout=300)
-    
+
     if response.status_code != 200:
         raise Exception(f"Groq API Error: {response.text}")
-    
+
     return response.json()
 
+# --- טיפול בסרטון ---
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video_path = None
     audio_path = None
     output_path = None
     video = None
-    
+
     try:
         if update.message.video.file_size > 50 * 1024 * 1024:
             await update.message.reply_text("❌ הסרטון גדול מדי! מקסימום 50MB")
             return
-        
+
         status_msg = await update.message.reply_text("⏳ מעבד את הסרטון... (עם Groq זה מהיר!)")
-        
+
+        # הורדת הסרטון
         video_file = await update.message.video.get_file()
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
             await video_file.download_to_drive(temp_video.name)
             video_path = temp_video.name
-        
+
         await status_msg.edit_text("🎤 מחלץ אודיו...")
-        
+
         video = VideoFileClip(video_path)
-        
         if video.duration > 600:
             await update.message.reply_text("❌ הסרטון ארוך מדי! מקסימום 10 דקות")
             video.close()
             os.remove(video_path)
             return
-        
+
         audio_path = video_path.replace('.mp4', '.mp3')
         video.audio.write_audiofile(audio_path, verbose=False, logger=None)
-        
+
         video.close()
         video = None
         gc.collect()
-        
+
         await status_msg.edit_text("🗣️ מתמלל דיבור עם Groq (מהיר!)...")
-        
+
         result = transcribe_with_groq(audio_path)
         segments = result.get('segments', [])
-        
+
         if not segments:
             await update.message.reply_text("❌ לא נמצא דיבור באודיו")
             return
-        
+
         gc.collect()
-        
+
         await status_msg.edit_text("🌍 מתרגם לעברית...")
-        
+
         translator = GoogleTranslator(source='en', target='iw')
         subtitles = []
-        
+
         for seg in segments:
             text = seg.get('text', '').strip()
-            print("Transcribed text:", text)  # הדפס טקסט מתומלל
             if text and len(text) > 2:
                 try:
                     translated = translator.translate(text)
-                    print("Translated subtitle:", translated)  # הדפס תרגום
                     subtitles.append({
                         'start': seg['start'],
                         'end': seg['end'],
                         'text': translated
                     })
-                except Exception as e:
-                    print("Translation error:", e)  # הדפס שגיאה
+                except Exception:
                     continue
-        
+
         if not subtitles:
             await update.message.reply_text("❌ לא נמצא טקסט לתרגום")
             return
-        
+
         await status_msg.edit_text("🎨 מוסיף כתוביות לסרטון...")
-        
+
+        # === כאן התיקון העיקרי ===
+        font_path = "fonts/NotoSansHebrew-Regular.ttf"  # הפונט החדש שלך
+
         video = VideoFileClip(video_path)
-        
         txt_clips = []
+
         for sub in subtitles:
+            # הפוך טקסט בעברית (RTL)
+            text_to_write = sub['text'][::-1]
+
             txt_clip = (TextClip(
-                sub['text'],
-                fontsize=22,
+                text_to_write,
+                fontsize=28,
                 color='white',
                 bg_color='black',
-                font='Arial',
+                font=font_path,
                 method='caption',
                 size=(video.w * 0.85, None)
             )
             .set_position(('center', video.h * 0.85))
             .set_start(sub['start'])
             .set_duration(sub['end'] - sub['start']))
-            
+
             txt_clips.append(txt_clip)
-        
+
         final_video = CompositeVideoClip([video] + txt_clips)
         output_path = video_path.replace('.mp4', '_subtitled.mp4')
-        
+
         final_video.write_videofile(
             output_path,
             codec='libx264',
@@ -169,13 +170,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             verbose=False,
             logger=None
         )
-        
+
         final_video.close()
         video.close()
         gc.collect()
-        
+
         await status_msg.edit_text("📤 שולח את הסרטון...")
-        
+
         with open(output_path, 'rb') as video_file_to_send:
             await update.message.reply_video(
                 video=video_file_to_send,
@@ -183,56 +184,54 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 read_timeout=60,
                 write_timeout=60
             )
-        
+
         await status_msg.delete()
-        
+
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text(f"❌ שגיאה: {str(e)}")
-        
+
     finally:
         try:
             if video:
                 video.close()
         except:
             pass
-        
+
         for file_path in [video_path, audio_path, output_path]:
             try:
                 if file_path and os.path.exists(file_path):
                     os.remove(file_path)
             except Exception as e:
                 logger.error(f"Failed to delete {file_path}: {e}")
-        
+
         gc.collect()
 
+# --- טיפול בשגיאות ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception: {context.error}")
 
+# --- הפעלת הבוט ---
 def run_bot():
     TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    
     if not TOKEN:
         logger.error("❌ TELEGRAM_BOT_TOKEN לא מוגדר!")
         return
-    
+
     GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
     if not GROQ_API_KEY:
         logger.error("❌ GROQ_API_KEY לא מוגדר!")
         return
-    
+
     application = Application.builder().token(TOKEN).build()
-    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.VIDEO, handle_video))
     application.add_error_handler(error_handler)
-    
-    logger.info("🤖 הבוט מתחיל לרוץ עם Groq...")
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True
-    )
 
+    logger.info("🤖 הבוט מתחיל לרוץ עם Groq...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+# --- הפעלת Flask לשמירה על חיות ---
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)

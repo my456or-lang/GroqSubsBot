@@ -1,8 +1,6 @@
+numpy<2.0.0
+Pillow
 python-telegram-bot==20.7
-flask==3.0.0
-deep-translator==1.11.4
-python-bidi==0.4.2
-arabic-reshaper==3.0.0
-requests==2.31.0
-moviepy==1.0.3
-Pillow>=9.0.0
+deep-translator
+moviepy
+flask
